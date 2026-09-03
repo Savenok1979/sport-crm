@@ -54,29 +54,22 @@ model User {
   employments Employee[]
 }
 
-enum EmployeeRole {
-  OWNER
-  ADMINISTRATOR
-  TRAINER
-}
-
-enum EmployeeStatus {
-  ACTIVE
-  INVITED
-  SUSPENDED
-}
+// SQLite has no native enum support in Prisma, so role/status-like fields are
+// plain String columns; the allowed values are enforced by zod in the routes
+// and mirrored as TS union types in src/lib/domain-types.ts. Switching the
+// datasource provider to postgresql later can reintroduce real enums.
 
 // Membership of a User inside an Organization, with role + scope.
 // Section 3: rights are checked on backend by role AND scope — never frontend-only.
 model Employee {
-  id             String         @id @default(cuid())
+  id             String       @id @default(cuid())
   organizationId String
-  organization   Organization   @relation(fields: [organizationId], references: [id])
+  organization   Organization @relation(fields: [organizationId], references: [id])
   userId         String
-  user           User           @relation(fields: [userId], references: [id])
-  role           EmployeeRole
-  status         EmployeeStatus @default(ACTIVE)
-  createdAt      DateTime       @default(now())
+  user           User         @relation(fields: [userId], references: [id])
+  role           String // OWNER | ADMINISTRATOR | TRAINER
+  status         String       @default("ACTIVE") // ACTIVE | INVITED | SUSPENDED
+  createdAt      DateTime     @default(now())
 
   venueAccess       EmployeeVenueAccess[] // scoping for ADMINISTRATOR
   coachOf           GroupCoach[]
@@ -144,28 +137,24 @@ model SportType {
   @@index([organizationId])
 }
 
-enum GroupStatus {
-  ACTIVE
-  ARCHIVED
-}
-
 model Group {
-  id                String       @id @default(cuid())
-  organizationId    String
-  organization      Organization @relation(fields: [organizationId], references: [id])
-  venueId           String
-  venue             Venue        @relation(fields: [venueId], references: [id])
-  sportTypeId       String
-  sportType         SportType    @relation(fields: [sportTypeId], references: [id])
-  name              String
-  participantLimit  Int? // null = unlimited; if set, fill/free seats are computed
-  status            GroupStatus  @default(ACTIVE)
-  createdAt         DateTime     @default(now())
+  id               String       @id @default(cuid())
+  organizationId   String
+  organization     Organization @relation(fields: [organizationId], references: [id])
+  venueId          String
+  venue            Venue        @relation(fields: [venueId], references: [id])
+  sportTypeId      String
+  sportType        SportType    @relation(fields: [sportTypeId], references: [id])
+  name             String
+  participantLimit Int? // null = unlimited; if set, fill/free seats are computed
+  status           String       @default("ACTIVE") // ACTIVE | ARCHIVED
+  createdAt        DateTime     @default(now())
 
-  coaches       GroupCoach[]
-  athleteGroups AthleteGroup[]
-  scheduleRules ScheduleRule[]
-  groupTariffs  GroupTariff[]
+  coaches          GroupCoach[]
+  athleteGroups    AthleteGroup[]
+  scheduleRules    ScheduleRule[]
+  trainingSessions TrainingSession[]
+  groupTariffs     GroupTariff[]
 
   @@index([organizationId])
   @@index([venueId])
@@ -190,22 +179,15 @@ model GroupCoach {
 // Athletes, representatives, group membership
 // ---------------------------------------------------------------
 
-enum AthleteStatus {
-  ACTIVE
-  PAUSED
-  LEFT
-  PENDING_SETUP // created via trainer quick-add, awaiting admin completion
-}
-
 model Athlete {
-  id             String        @id @default(cuid())
+  id             String       @id @default(cuid())
   organizationId String
-  organization   Organization  @relation(fields: [organizationId], references: [id])
+  organization   Organization @relation(fields: [organizationId], references: [id])
   fullName       String
   dateOfBirth    DateTime?
   gender         String?
   photoUrl       String?
-  status         AthleteStatus @default(PENDING_SETUP)
+  status         String       @default("PENDING_SETUP") // ACTIVE | PAUSED | LEFT | PENDING_SETUP
   source         String?
   startDate      DateTime?
   pauseStartDate DateTime?
@@ -255,23 +237,18 @@ model AthleteRepresentative {
   @@unique([athleteId, representativeId])
 }
 
-enum AthleteGroupStatus {
-  ACTIVE
-  CLOSED // ended either by transfer ("перевод") or leaving the group
-}
-
 // One row per athlete's participation in one group for one period.
 // "Перевести" = close this row + open a new AthleteGroup elsewhere.
 // "Добавить в группу" = open a second, parallel, still-ACTIVE row.
 model AthleteGroup {
-  id        String             @id @default(cuid())
+  id        String    @id @default(cuid())
   athleteId String
-  athlete   Athlete            @relation(fields: [athleteId], references: [id])
+  athlete   Athlete   @relation(fields: [athleteId], references: [id])
   groupId   String
-  group     Group              @relation(fields: [groupId], references: [id])
+  group     Group     @relation(fields: [groupId], references: [id])
   startDate DateTime
   endDate   DateTime?
-  status    AthleteGroupStatus @default(ACTIVE)
+  status    String    @default("ACTIVE") // ACTIVE | CLOSED (transfer or leaving the group)
 
   athleteTariffs AthleteTariff[]
   attendances    Attendance[]
@@ -283,16 +260,6 @@ model AthleteGroup {
 // ---------------------------------------------------------------
 // Leads / funnel
 // ---------------------------------------------------------------
-
-enum LeadStage {
-  NEW
-  TRIAL_SCHEDULED
-  TRIAL_ATTENDED
-  ENROLLED
-  NO_SHOW
-  REJECTED
-  WAITLIST
-}
 
 model Lead {
   id                    String       @id @default(cuid())
@@ -306,7 +273,7 @@ model Lead {
   sportTypeId           String?
   venueId               String?
   source                String?
-  stage                 LeadStage    @default(NEW)
+  stage                 String       @default("NEW") // NEW | TRIAL_SCHEDULED | TRIAL_ATTENDED | ENROLLED | NO_SHOW | REJECTED | WAITLIST
   responsibleEmployeeId String?
   responsibleEmployee   Employee?    @relation(fields: [responsibleEmployeeId], references: [id])
   athleteId             String? // set once enrolled
@@ -320,12 +287,6 @@ model Lead {
   @@index([organizationId, stage])
 }
 
-enum TrialResult {
-  SCHEDULED
-  ATTENDED
-  NO_SHOW
-}
-
 model TrialSession {
   id                String           @id @default(cuid())
   leadId            String
@@ -333,7 +294,7 @@ model TrialSession {
   trainingSessionId String?
   trainingSession   TrainingSession? @relation(fields: [trainingSessionId], references: [id])
   scheduledAt       DateTime
-  result            TrialResult      @default(SCHEDULED)
+  result            String           @default("SCHEDULED") // SCHEDULED | ATTENDED | NO_SHOW
 
   @@index([leadId])
 }
@@ -364,27 +325,21 @@ model ScheduleRule {
   @@index([venueId, dayOfWeek])
 }
 
-enum TrainingSessionStatus {
-  SCHEDULED
-  HELD
-  CANCELLED
-}
-
 // A concrete, dated occurrence generated from a ScheduleRule (or created standalone).
 model TrainingSession {
-  id                    String                 @id @default(cuid())
+  id                    String        @id @default(cuid())
   scheduleRuleId        String?
-  scheduleRule          ScheduleRule?          @relation(fields: [scheduleRuleId], references: [id])
+  scheduleRule          ScheduleRule? @relation(fields: [scheduleRuleId], references: [id])
   groupId               String
-  group                 Group                  @relation(fields: [groupId], references: [id])
+  group                 Group         @relation(fields: [groupId], references: [id])
   venueId               String
-  venue                 Venue                  @relation(fields: [venueId], references: [id])
+  venue                 Venue         @relation(fields: [venueId], references: [id])
   zoneId                String?
-  zone                  Zone?                  @relation(fields: [zoneId], references: [id])
+  zone                  Zone?         @relation(fields: [zoneId], references: [id])
   coachEmployeeId       String?
   startsAt              DateTime
   endsAt                DateTime
-  status                TrainingSessionStatus  @default(SCHEDULED)
+  status                String        @default("SCHEDULED") // SCHEDULED | HELD | CANCELLED
   cancelReason          String? // force-majeure only, per section 7.3
   attendanceCompletedAt DateTime?
 
@@ -396,24 +351,19 @@ model TrainingSession {
   @@index([coachEmployeeId, startsAt])
 }
 
-enum AttendanceStatus {
-  PRESENT
-  ABSENT
-}
-
 // Section 7.4: the only two states are Present/Absent, editable by the trainer
 // until end of calendar day, by admin/owner afterwards.
 model Attendance {
-  id                 String            @id @default(cuid())
+  id                 String          @id @default(cuid())
   trainingSessionId  String
-  trainingSession    TrainingSession   @relation(fields: [trainingSessionId], references: [id])
+  trainingSession    TrainingSession @relation(fields: [trainingSessionId], references: [id])
   athleteId          String
-  athlete            Athlete           @relation(fields: [athleteId], references: [id])
+  athlete            Athlete         @relation(fields: [athleteId], references: [id])
   athleteGroupId     String?
-  athleteGroup       AthleteGroup?     @relation(fields: [athleteGroupId], references: [id])
-  status             AttendanceStatus
+  athleteGroup       AthleteGroup?   @relation(fields: [athleteGroupId], references: [id])
+  status             String // PRESENT | ABSENT
   markedByEmployeeId String?
-  markedAt           DateTime          @default(now())
+  markedAt           DateTime        @default(now())
   editedAt           DateTime?
 
   @@unique([trainingSessionId, athleteId])
@@ -485,32 +435,26 @@ model Discount {
 // Finance: charges, adjustments, payments, allocations, receipts
 // ---------------------------------------------------------------
 
-enum ChargeStatus {
-  UNPAID
-  PARTIALLY_PAID
-  PAID
-}
-
 // One row per athlete + group + tariff + period (unique constraint prevents duplicates).
 model Charge {
-  id                   String         @id @default(cuid())
+  id                   String              @id @default(cuid())
   organizationId       String
-  organization         Organization   @relation(fields: [organizationId], references: [id])
+  organization         Organization        @relation(fields: [organizationId], references: [id])
   athleteId            String
-  athlete              Athlete        @relation(fields: [athleteId], references: [id])
+  athlete              Athlete             @relation(fields: [athleteId], references: [id])
   athleteTariffId      String?
-  athleteTariff        AthleteTariff? @relation(fields: [athleteTariffId], references: [id])
-  individualTrainingId String?        @unique
+  athleteTariff        AthleteTariff?      @relation(fields: [athleteTariffId], references: [id])
+  individualTrainingId String?             @unique
   individualTraining   IndividualTraining? @relation(fields: [individualTrainingId], references: [id])
   period               String // "2026-09" for monthly, or the training date for individual
   baseAmount           Int
-  discountAmount       Int            @default(0)
-  adjustmentAmount     Int            @default(0)
+  discountAmount       Int                 @default(0)
+  adjustmentAmount     Int                 @default(0)
   totalAmount          Int // baseAmount - discountAmount + adjustmentAmount, never negative
   dueDate              DateTime
-  status               ChargeStatus   @default(UNPAID)
-  isManual             Boolean        @default(false)
-  createdAt            DateTime       @default(now())
+  status               String              @default("UNPAID") // UNPAID | PARTIALLY_PAID | PAID
+  isManual             Boolean             @default(false)
+  createdAt            DateTime            @default(now())
 
   adjustments Adjustment[]
   allocations PaymentAllocation[]
@@ -534,33 +478,20 @@ model Adjustment {
   @@index([chargeId])
 }
 
-enum PaymentMethod {
-  CASH
-  BANK_TRANSFER
-  SBP
-  CARD
-  OTHER
-}
-
-enum PaymentStatus {
-  CONFIRMED
-  REVERSED
-}
-
 // Physical deletion is forbidden — mistakes are corrected via REVERSED + reason.
 model Payment {
-  id                  String        @id @default(cuid())
+  id                  String       @id @default(cuid())
   organizationId      String
-  organization        Organization  @relation(fields: [organizationId], references: [id])
+  organization        Organization @relation(fields: [organizationId], references: [id])
   athleteId           String
-  athlete             Athlete       @relation(fields: [athleteId], references: [id])
+  athlete             Athlete      @relation(fields: [athleteId], references: [id])
   amount              Int
-  method              PaymentMethod
-  status              PaymentStatus @default(CONFIRMED)
-  reversalReason       String?
+  method              String // CASH | BANK_TRANSFER | SBP | CARD | OTHER
+  status              String       @default("CONFIRMED") // CONFIRMED | REVERSED
+  reversalReason      String?
   reversedAt          DateTime?
   createdByEmployeeId String
-  createdAt           DateTime      @default(now())
+  createdAt           DateTime     @default(now())
 
   allocations PaymentAllocation[]
 
@@ -597,14 +528,14 @@ model Receipt {
 
 // One-off session; creates exactly one Charge, once, after status becomes HELD.
 model IndividualTraining {
-  id              String                 @id @default(cuid())
+  id              String   @id @default(cuid())
   organizationId  String
   athleteId       String
-  athlete         Athlete                @relation(fields: [athleteId], references: [id])
+  athlete         Athlete  @relation(fields: [athleteId], references: [id])
   coachEmployeeId String?
   venueId         String?
   scheduledAt     DateTime
-  status          TrainingSessionStatus  @default(SCHEDULED)
+  status          String   @default("SCHEDULED") // SCHEDULED | HELD | CANCELLED
   price           Int
 
   charge Charge?
@@ -631,21 +562,13 @@ model MessageTemplate {
   @@index([organizationId])
 }
 
-enum MailingScopeType {
-  ORGANIZATION
-  VENUE
-  SPORT
-  GROUP
-  SELECTED
-}
-
 model Mailing {
   id                  String           @id @default(cuid())
   organizationId      String
   organization        Organization     @relation(fields: [organizationId], references: [id])
   templateId          String?
   template            MessageTemplate? @relation(fields: [templateId], references: [id])
-  scopeType           MailingScopeType
+  scopeType           String // ORGANIZATION | VENUE | SPORT | GROUP | SELECTED
   scopeId             String? // venueId / sportTypeId / groupId depending on scopeType
   createdByEmployeeId String
   createdAt           DateTime         @default(now())
@@ -655,24 +578,16 @@ model Mailing {
   @@index([organizationId])
 }
 
-enum CommunicationStatus {
-  QUEUED
-  SENT
-  DELIVERED
-  FAILED
-  BOUNCED
-}
-
 // History is kept per concrete recipient (representative), not per thread.
 model CommunicationLog {
-  id                String               @id @default(cuid())
+  id                String    @id @default(cuid())
   mailingId         String?
-  mailing           Mailing?             @relation(fields: [mailingId], references: [id])
+  mailing           Mailing?  @relation(fields: [mailingId], references: [id])
   athleteId         String?
-  athlete           Athlete?             @relation(fields: [athleteId], references: [id])
+  athlete           Athlete?  @relation(fields: [athleteId], references: [id])
   representativeId  String?
-  channel           String               @default("EMAIL")
-  status            CommunicationStatus  @default(QUEUED)
+  channel           String    @default("EMAIL")
+  status            String    @default("QUEUED") // QUEUED | SENT | DELIVERED | FAILED | BOUNCED
   providerMessageId String?
   sentAt            DateTime?
 

@@ -2,6 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../lib/prisma";
 import { requireAuth } from "../middleware/auth";
+import { resolveVenueScope } from "../lib/scope";
 
 export const leadsRouter = Router();
 leadsRouter.use(requireAuth);
@@ -10,8 +11,15 @@ leadsRouter.use(requireAuth);
 leadsRouter.get("/", async (req, res) => {
   const { organizationId } = req.employee!;
   const stage = typeof req.query.stage === "string" ? req.query.stage : undefined;
+  // Administrators only see leads for their assigned venues (section 3); leads
+  // with no venue set yet are org-wide intake and stay visible to everyone.
+  const venueScope = await resolveVenueScope(req.employee!);
   const leads = await prisma.lead.findMany({
-    where: { organizationId, ...(stage ? { stage: stage as any } : {}) },
+    where: {
+      organizationId,
+      ...(stage ? { stage: stage as any } : {}),
+      ...(venueScope ? { OR: [{ venueId: { in: venueScope } }, { venueId: null }] } : {}),
+    },
     include: { responsibleEmployee: { include: { user: true } }, trialSessions: true },
     orderBy: { createdAt: "desc" },
   });

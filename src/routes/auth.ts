@@ -3,6 +3,7 @@ import bcrypt from "bcryptjs";
 import { z } from "zod";
 import { prisma } from "../lib/prisma";
 import { signEmployeeToken } from "../middleware/auth";
+import { EmployeeRole } from "../lib/domain-types";
 
 export const authRouter = Router();
 
@@ -39,7 +40,7 @@ authRouter.post("/login", async (req, res) => {
     employeeId: employment.id,
     userId: user.id,
     organizationId: employment.organizationId,
-    role: employment.role,
+    role: employment.role as EmployeeRole,
   });
 
   await prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });

@@ -2,6 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../lib/prisma";
 import { requireAuth, requireRole } from "../middleware/auth";
+import { assertAthleteInScope, resolveGroupScope } from "../lib/scope";
 
 export const financeRouter = Router();
 financeRouter.use(requireAuth);
@@ -14,10 +15,15 @@ financeRouter.use(requireRole("OWNER", "ADMINISTRATOR"));
 financeRouter.post("/charges/generate-monthly", async (req, res) => {
   const { organizationId } = req.employee!;
   const period = String(req.body.period ?? new Date().toISOString().slice(0, 7));
+  const groupScope = await resolveGroupScope(req.employee!);
 
   const activeTariffs = await prisma.athleteTariff.findMany({
     where: {
-      athleteGroup: { status: "ACTIVE", athlete: { organizationId, status: "ACTIVE" } },
+      athleteGroup: {
+        status: "ACTIVE",
+        athlete: { organizationId, status: "ACTIVE" },
+        ...(groupScope ? { groupId: { in: groupScope } } : {}),
+      },
       OR: [{ endDate: null }, { endDate: { gte: new Date() } }],
     },
     include: { tariff: true, discounts: true, athleteGroup: true },
@@ -61,8 +67,14 @@ financeRouter.post("/charges/generate-monthly", async (req, res) => {
 // GET /api/v1/finance/debts — aging buckets per PRD section 8.4 / 10.2.
 financeRouter.get("/debts", async (req, res) => {
   const { organizationId } = req.employee!;
+  const groupScope = await resolveGroupScope(req.employee!);
   const unpaid = await prisma.charge.findMany({
-    where: { organizationId, status: { in: ["UNPAID", "PARTIALLY_PAID"] }, dueDate: { lt: new Date() } },
+    where: {
+      organizationId,
+      status: { in: ["UNPAID", "PARTIALLY_PAID"] },
+      dueDate: { lt: new Date() },
+      ...(groupScope ? { athlete: { athleteGroups: { some: { groupId: { in: groupScope } } } } } : {}),
+    },
     include: { athlete: true, allocations: true },
   });
 
@@ -91,6 +103,10 @@ financeRouter.post("/payments", async (req, res) => {
   const parsed = paymentSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
   const { athleteId, amount, method, allocations } = parsed.data;
+
+  if (!(await assertAthleteInScope(req.employee!, athleteId))) {
+    return res.status(404).json({ error: "Athlete not found" });
+  }
 
   const payment = await prisma.$transaction(async (tx) => {
     const payment = await tx.payment.create({
@@ -144,8 +160,15 @@ const reversalSchema = z.object({ reason: z.string().min(1) });
 
 // POST /api/v1/finance/payments/:id/reverse — physical deletion is forbidden (section 8.4).
 financeRouter.post("/payments/:id/reverse", async (req, res) => {
+  const { organizationId } = req.employee!;
   const parsed = reversalSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+  const existing = await prisma.payment.findFirst({ where: { id: req.params.id, organizationId } });
+  if (!existing) return res.status(404).json({ error: "Payment not found" });
+  if (!(await assertAthleteInScope(req.employee!, existing.athleteId))) {
+    return res.status(404).json({ error: "Payment not found" });
+  }
 
   const payment = await prisma.$transaction(async (tx) => {
     const p = await tx.payment.update({

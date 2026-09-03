@@ -2,21 +2,19 @@ import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../lib/prisma";
 import { requireAuth } from "../middleware/auth";
+import { assertAthleteInScope, resolveGroupScope } from "../lib/scope";
 
 export const athletesRouter = Router();
 athletesRouter.use(requireAuth);
 
 // GET /api/v1/athletes?search=&groupId=&status=
 athletesRouter.get("/", async (req, res) => {
-  const { organizationId, role, employeeId } = req.employee!;
+  const { organizationId } = req.employee!;
   const { search, groupId, status } = req.query as Record<string, string | undefined>;
 
-  // Trainers only ever see athletes in groups they coach (section 3 scope rule).
-  let groupIdFilter: string[] | undefined;
-  if (role === "TRAINER") {
-    const coachGroups = await prisma.groupCoach.findMany({ where: { employeeId }, select: { groupId: true } });
-    groupIdFilter = coachGroups.map((g) => g.groupId);
-  }
+  // Administrators only see athletes at their assigned venues, trainers only
+  // in groups they coach (section 3 scope rule) — enforced here, not in the UI.
+  const groupScope = await resolveGroupScope(req.employee!);
 
   const athletes = await prisma.athlete.findMany({
     where: {
@@ -27,7 +25,7 @@ athletesRouter.get("/", async (req, res) => {
         some: {
           status: "ACTIVE",
           ...(groupId ? { groupId } : {}),
-          ...(groupIdFilter ? { groupId: { in: groupIdFilter } } : {}),
+          ...(groupScope ? { groupId: { in: groupScope } } : {}),
         },
       },
     },
@@ -50,6 +48,9 @@ athletesRouter.get("/:id", async (req, res) => {
     },
   });
   if (!athlete) return res.status(404).json({ error: "Athlete not found" });
+  if (!(await assertAthleteInScope(req.employee!, athlete.id))) {
+    return res.status(404).json({ error: "Athlete not found" });
+  }
   res.json(athlete);
 });
 

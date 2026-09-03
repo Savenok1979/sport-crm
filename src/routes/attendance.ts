@@ -2,6 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../lib/prisma";
 import { requireAuth } from "../middleware/auth";
+import { resolveVenueScope } from "../lib/scope";
 
 export const attendanceRouter = Router();
 attendanceRouter.use(requireAuth);
@@ -11,11 +12,13 @@ attendanceRouter.get("/today", async (req, res) => {
   const { employeeId, role } = req.employee!;
   const start = new Date(); start.setHours(0, 0, 0, 0);
   const end = new Date(); end.setHours(23, 59, 59, 999);
+  const venueScope = await resolveVenueScope(req.employee!);
 
   const sessions = await prisma.trainingSession.findMany({
     where: {
       startsAt: { gte: start, lte: end },
       ...(role === "TRAINER" ? { coachEmployeeId: employeeId } : {}),
+      ...(venueScope ? { venueId: { in: venueScope } } : {}),
       status: { not: "CANCELLED" },
     },
     include: {

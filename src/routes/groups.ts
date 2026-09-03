@@ -2,14 +2,16 @@ import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../lib/prisma";
 import { requireAuth, requireRole } from "../middleware/auth";
+import { resolveGroupScope } from "../lib/scope";
 
 export const groupsRouter = Router();
 groupsRouter.use(requireAuth);
 
 groupsRouter.get("/", async (req, res) => {
   const { organizationId } = req.employee!;
+  const groupScope = await resolveGroupScope(req.employee!);
   const groups = await prisma.group.findMany({
-    where: { organizationId, status: "ACTIVE" },
+    where: { organizationId, status: "ACTIVE", ...(groupScope ? { id: { in: groupScope } } : {}) },
     include: {
       venue: true,
       sportType: true,
