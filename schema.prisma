@@ -1,0 +1,701 @@
+// Sports CRM — data model derived from Sports_CRM_PRD_TZ_v1_0, раздел 14 и 14.1
+// Start on SQLite for local dev; switch provider to "postgresql" for staging/prod.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------
+// Tenancy / identity
+// ---------------------------------------------------------------
+
+model Organization {
+  id               String    @id @default(cuid())
+  name             String
+  legalDetails     String?
+  timezone         String    @default("Europe/Moscow")
+  currency         String    @default("RUB")
+  logoUrl          String?
+  saasAthleteLimit Int? // billed by active-athlete count; null = unlimited (pilot)
+  createdAt        DateTime  @default(now())
+  archivedAt       DateTime?
+
+  employees        Employee[]
+  venues           Venue[]
+  sportTypes       SportType[]
+  groups           Group[]
+  athletes         Athlete[]
+  representatives  Representative[]
+  leads            Lead[]
+  tariffs          Tariff[]
+  charges          Charge[]
+  payments         Payment[]
+  messageTemplates MessageTemplate[]
+  mailings         Mailing[]
+  auditLogs        AuditLog[]
+}
+
+// Login account. One User can be an Employee of more than one Organization.
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  passwordHash String
+  fullName     String
+  phone        String?
+  status       String    @default("ACTIVE") // ACTIVE | LOCKED
+  lastLoginAt  DateTime?
+  createdAt    DateTime  @default(now())
+
+  employments Employee[]
+}
+
+enum EmployeeRole {
+  OWNER
+  ADMINISTRATOR
+  TRAINER
+}
+
+enum EmployeeStatus {
+  ACTIVE
+  INVITED
+  SUSPENDED
+}
+
+// Membership of a User inside an Organization, with role + scope.
+// Section 3: rights are checked on backend by role AND scope — never frontend-only.
+model Employee {
+  id             String         @id @default(cuid())
+  organizationId String
+  organization   Organization   @relation(fields: [organizationId], references: [id])
+  userId         String
+  user           User           @relation(fields: [userId], references: [id])
+  role           EmployeeRole
+  status         EmployeeStatus @default(ACTIVE)
+  createdAt      DateTime       @default(now())
+
+  venueAccess       EmployeeVenueAccess[] // scoping for ADMINISTRATOR
+  coachOf           GroupCoach[]
+  leadsResponsible  Lead[]
+  auditLogs         AuditLog[]
+
+  @@unique([organizationId, userId])
+  @@index([organizationId])
+}
+
+// Administrator scope: which venues they can operate on. Owner implicitly sees all.
+model EmployeeVenueAccess {
+  id         String   @id @default(cuid())
+  employeeId String
+  employee   Employee @relation(fields: [employeeId], references: [id])
+  venueId    String
+  venue      Venue    @relation(fields: [venueId], references: [id])
+
+  @@unique([employeeId, venueId])
+}
+
+// ---------------------------------------------------------------
+// Org structure: Venue -> Zone, SportType -> Group
+// ---------------------------------------------------------------
+
+model Venue {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  name           String
+  address        String?
+  archivedAt     DateTime?
+
+  zones            Zone[]
+  groups           Group[]
+  employeeAccess   EmployeeVenueAccess[]
+  scheduleRules    ScheduleRule[]
+  trainingSessions TrainingSession[]
+
+  @@index([organizationId])
+}
+
+// Optional hall/zone inside a venue, used for schedule-conflict checks.
+model Zone {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id])
+  name    String
+
+  scheduleRules    ScheduleRule[]
+  trainingSessions TrainingSession[]
+
+  @@index([venueId])
+}
+
+model SportType {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  name           String
+  archivedAt     DateTime?
+
+  groups Group[]
+
+  @@index([organizationId])
+}
+
+enum GroupStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+model Group {
+  id                String       @id @default(cuid())
+  organizationId    String
+  organization      Organization @relation(fields: [organizationId], references: [id])
+  venueId           String
+  venue             Venue        @relation(fields: [venueId], references: [id])
+  sportTypeId       String
+  sportType         SportType    @relation(fields: [sportTypeId], references: [id])
+  name              String
+  participantLimit  Int? // null = unlimited; if set, fill/free seats are computed
+  status            GroupStatus  @default(ACTIVE)
+  createdAt         DateTime     @default(now())
+
+  coaches       GroupCoach[]
+  athleteGroups AthleteGroup[]
+  scheduleRules ScheduleRule[]
+  groupTariffs  GroupTariff[]
+
+  @@index([organizationId])
+  @@index([venueId])
+}
+
+// Many-to-many Group <-> Employee(trainer), with period + role (e.g. main/assistant).
+model GroupCoach {
+  id         String    @id @default(cuid())
+  groupId    String
+  group      Group     @relation(fields: [groupId], references: [id])
+  employeeId String
+  employee   Employee  @relation(fields: [employeeId], references: [id])
+  coachRole  String    @default("MAIN")
+  startDate  DateTime  @default(now())
+  endDate    DateTime?
+
+  @@index([groupId])
+  @@index([employeeId])
+}
+
+// ---------------------------------------------------------------
+// Athletes, representatives, group membership
+// ---------------------------------------------------------------
+
+enum AthleteStatus {
+  ACTIVE
+  PAUSED
+  LEFT
+  PENDING_SETUP // created via trainer quick-add, awaiting admin completion
+}
+
+model Athlete {
+  id             String        @id @default(cuid())
+  organizationId String
+  organization   Organization  @relation(fields: [organizationId], references: [id])
+  fullName       String
+  dateOfBirth    DateTime?
+  gender         String?
+  photoUrl       String?
+  status         AthleteStatus @default(PENDING_SETUP)
+  source         String?
+  startDate      DateTime?
+  pauseStartDate DateTime?
+  pauseEndDate   DateTime?
+  leftDate       DateTime?
+  leftReason     String?
+  adminComment   String?
+  coachComment   String?
+  createdAt      DateTime      @default(now())
+
+  representatives     AthleteRepresentative[]
+  athleteGroups       AthleteGroup[]
+  attendances         Attendance[]
+  charges             Charge[]
+  payments            Payment[]
+  individualTrainings IndividualTraining[]
+  communicationLogs   CommunicationLog[]
+  leads               Lead[]
+
+  @@index([organizationId])
+  @@index([organizationId, fullName])
+}
+
+model Representative {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  fullName       String
+  phone          String?
+  email          String?
+
+  athletes AthleteRepresentative[]
+
+  @@index([organizationId])
+}
+
+model AthleteRepresentative {
+  id                             String          @id @default(cuid())
+  athleteId                      String
+  athlete                        Athlete         @relation(fields: [athleteId], references: [id])
+  representativeId               String
+  representative                 Representative  @relation(fields: [representativeId], references: [id])
+  isPrimary                      Boolean         @default(false)
+  receivesFinancialMessages      Boolean         @default(true)
+  receivesOrganizationalMessages Boolean         @default(true)
+
+  @@unique([athleteId, representativeId])
+}
+
+enum AthleteGroupStatus {
+  ACTIVE
+  CLOSED // ended either by transfer ("перевод") or leaving the group
+}
+
+// One row per athlete's participation in one group for one period.
+// "Перевести" = close this row + open a new AthleteGroup elsewhere.
+// "Добавить в группу" = open a second, parallel, still-ACTIVE row.
+model AthleteGroup {
+  id        String             @id @default(cuid())
+  athleteId String
+  athlete   Athlete            @relation(fields: [athleteId], references: [id])
+  groupId   String
+  group     Group              @relation(fields: [groupId], references: [id])
+  startDate DateTime
+  endDate   DateTime?
+  status    AthleteGroupStatus @default(ACTIVE)
+
+  athleteTariffs AthleteTariff[]
+  attendances    Attendance[]
+
+  @@index([groupId])
+  @@index([athleteId])
+}
+
+// ---------------------------------------------------------------
+// Leads / funnel
+// ---------------------------------------------------------------
+
+enum LeadStage {
+  NEW
+  TRIAL_SCHEDULED
+  TRIAL_ATTENDED
+  ENROLLED
+  NO_SHOW
+  REJECTED
+  WAITLIST
+}
+
+model Lead {
+  id                    String       @id @default(cuid())
+  organizationId        String
+  organization          Organization @relation(fields: [organizationId], references: [id])
+  childFullName         String
+  dateOfBirth           DateTime?
+  parentName            String?
+  phone                 String?
+  email                 String?
+  sportTypeId           String?
+  venueId               String?
+  source                String?
+  stage                 LeadStage    @default(NEW)
+  responsibleEmployeeId String?
+  responsibleEmployee   Employee?    @relation(fields: [responsibleEmployeeId], references: [id])
+  athleteId             String? // set once enrolled
+  athlete               Athlete?     @relation(fields: [athleteId], references: [id])
+  comment               String?
+  createdAt             DateTime     @default(now())
+
+  trialSessions TrialSession[]
+
+  @@index([organizationId])
+  @@index([organizationId, stage])
+}
+
+enum TrialResult {
+  SCHEDULED
+  ATTENDED
+  NO_SHOW
+}
+
+model TrialSession {
+  id                String           @id @default(cuid())
+  leadId            String
+  lead              Lead             @relation(fields: [leadId], references: [id])
+  trainingSessionId String?
+  trainingSession   TrainingSession? @relation(fields: [trainingSessionId], references: [id])
+  scheduledAt       DateTime
+  result            TrialResult      @default(SCHEDULED)
+
+  @@index([leadId])
+}
+
+// ---------------------------------------------------------------
+// Schedule / attendance
+// ---------------------------------------------------------------
+
+// Recurring rule. Editing it never rewrites already-generated TrainingSessions.
+model ScheduleRule {
+  id              String    @id @default(cuid())
+  groupId         String
+  group           Group     @relation(fields: [groupId], references: [id])
+  venueId         String
+  venue           Venue     @relation(fields: [venueId], references: [id])
+  zoneId          String?
+  zone            Zone?     @relation(fields: [zoneId], references: [id])
+  coachEmployeeId String?
+  dayOfWeek       Int // 0 = Monday .. 6 = Sunday
+  startTime       String // "17:00"
+  endTime         String // "18:00"
+  effectiveFrom   DateTime
+  effectiveTo     DateTime?
+
+  trainingSessions TrainingSession[]
+
+  @@index([groupId])
+  @@index([venueId, dayOfWeek])
+}
+
+enum TrainingSessionStatus {
+  SCHEDULED
+  HELD
+  CANCELLED
+}
+
+// A concrete, dated occurrence generated from a ScheduleRule (or created standalone).
+model TrainingSession {
+  id                    String                 @id @default(cuid())
+  scheduleRuleId        String?
+  scheduleRule          ScheduleRule?          @relation(fields: [scheduleRuleId], references: [id])
+  groupId               String
+  group                 Group                  @relation(fields: [groupId], references: [id])
+  venueId               String
+  venue                 Venue                  @relation(fields: [venueId], references: [id])
+  zoneId                String?
+  zone                  Zone?                  @relation(fields: [zoneId], references: [id])
+  coachEmployeeId       String?
+  startsAt              DateTime
+  endsAt                DateTime
+  status                TrainingSessionStatus  @default(SCHEDULED)
+  cancelReason          String? // force-majeure only, per section 7.3
+  attendanceCompletedAt DateTime?
+
+  attendances   Attendance[]
+  trialSessions TrialSession[]
+
+  @@index([groupId, startsAt])
+  @@index([venueId, startsAt])
+  @@index([coachEmployeeId, startsAt])
+}
+
+enum AttendanceStatus {
+  PRESENT
+  ABSENT
+}
+
+// Section 7.4: the only two states are Present/Absent, editable by the trainer
+// until end of calendar day, by admin/owner afterwards.
+model Attendance {
+  id                 String            @id @default(cuid())
+  trainingSessionId  String
+  trainingSession    TrainingSession   @relation(fields: [trainingSessionId], references: [id])
+  athleteId          String
+  athlete            Athlete           @relation(fields: [athleteId], references: [id])
+  athleteGroupId     String?
+  athleteGroup       AthleteGroup?     @relation(fields: [athleteGroupId], references: [id])
+  status             AttendanceStatus
+  markedByEmployeeId String?
+  markedAt           DateTime          @default(now())
+  editedAt           DateTime?
+
+  @@unique([trainingSessionId, athleteId])
+  @@index([athleteId])
+}
+
+// ---------------------------------------------------------------
+// Tariffs, discounts
+// ---------------------------------------------------------------
+
+model Tariff {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  name           String
+  price          Int // minor currency units (kopecks) — never float
+  isIndividual   Boolean      @default(false) // true = one-off individual training rate
+  archivedAt     DateTime?
+
+  groupTariffs   GroupTariff[]
+  athleteTariffs AthleteTariff[]
+
+  @@index([organizationId])
+}
+
+// Which tariffs are offered for which group.
+model GroupTariff {
+  id       String @id @default(cuid())
+  groupId  String
+  group    Group  @relation(fields: [groupId], references: [id])
+  tariffId String
+  tariff   Tariff @relation(fields: [tariffId], references: [id])
+
+  @@unique([groupId, tariffId])
+}
+
+// The tariff actually applied to one athlete in one AthleteGroup, for a period.
+model AthleteTariff {
+  id             String        @id @default(cuid())
+  athleteId      String
+  athleteGroupId String
+  athleteGroup   AthleteGroup  @relation(fields: [athleteGroupId], references: [id])
+  tariffId       String
+  tariff         Tariff        @relation(fields: [tariffId], references: [id])
+  startDate      DateTime
+  endDate        DateTime?
+  overridePrice  Int? // organization- or athlete-level override of the due date/price
+
+  discounts Discount[]
+  charges   Charge[]
+
+  @@index([athleteGroupId])
+  @@index([athleteId])
+}
+
+model Discount {
+  id              String        @id @default(cuid())
+  athleteTariffId String
+  athleteTariff   AthleteTariff @relation(fields: [athleteTariffId], references: [id])
+  kind            String // PERCENT | FIXED
+  value           Int
+  startDate       DateTime
+  endDate         DateTime?
+
+  @@index([athleteTariffId])
+}
+
+// ---------------------------------------------------------------
+// Finance: charges, adjustments, payments, allocations, receipts
+// ---------------------------------------------------------------
+
+enum ChargeStatus {
+  UNPAID
+  PARTIALLY_PAID
+  PAID
+}
+
+// One row per athlete + group + tariff + period (unique constraint prevents duplicates).
+model Charge {
+  id                   String         @id @default(cuid())
+  organizationId       String
+  organization         Organization   @relation(fields: [organizationId], references: [id])
+  athleteId            String
+  athlete              Athlete        @relation(fields: [athleteId], references: [id])
+  athleteTariffId      String?
+  athleteTariff        AthleteTariff? @relation(fields: [athleteTariffId], references: [id])
+  individualTrainingId String?        @unique
+  individualTraining   IndividualTraining? @relation(fields: [individualTrainingId], references: [id])
+  period               String // "2026-09" for monthly, or the training date for individual
+  baseAmount           Int
+  discountAmount       Int            @default(0)
+  adjustmentAmount     Int            @default(0)
+  totalAmount          Int // baseAmount - discountAmount + adjustmentAmount, never negative
+  dueDate              DateTime
+  status               ChargeStatus   @default(UNPAID)
+  isManual             Boolean        @default(false)
+  createdAt            DateTime       @default(now())
+
+  adjustments Adjustment[]
+  allocations PaymentAllocation[]
+  receipts    Receipt[]
+
+  @@unique([athleteTariffId, period])
+  @@index([organizationId])
+  @@index([athleteId, status])
+}
+
+// Manual recalculation only — amount, reason, employee and date are all required.
+model Adjustment {
+  id         String   @id @default(cuid())
+  chargeId   String
+  charge     Charge   @relation(fields: [chargeId], references: [id])
+  amount     Int // can be negative (discount-like) or positive (extra charge)
+  reason     String
+  employeeId String
+  createdAt  DateTime @default(now())
+
+  @@index([chargeId])
+}
+
+enum PaymentMethod {
+  CASH
+  BANK_TRANSFER
+  SBP
+  CARD
+  OTHER
+}
+
+enum PaymentStatus {
+  CONFIRMED
+  REVERSED
+}
+
+// Physical deletion is forbidden — mistakes are corrected via REVERSED + reason.
+model Payment {
+  id                  String        @id @default(cuid())
+  organizationId      String
+  organization        Organization  @relation(fields: [organizationId], references: [id])
+  athleteId           String
+  athlete             Athlete       @relation(fields: [athleteId], references: [id])
+  amount              Int
+  method              PaymentMethod
+  status              PaymentStatus @default(CONFIRMED)
+  reversalReason       String?
+  reversedAt          DateTime?
+  createdByEmployeeId String
+  createdAt           DateTime      @default(now())
+
+  allocations PaymentAllocation[]
+
+  @@index([organizationId])
+  @@index([athleteId])
+}
+
+// Default: oldest unpaid Charge first. Admin can re-distribute before confirmation.
+model PaymentAllocation {
+  id        String  @id @default(cuid())
+  paymentId String
+  payment   Payment @relation(fields: [paymentId], references: [id])
+  chargeId  String
+  charge    Charge  @relation(fields: [chargeId], references: [id])
+  amount    Int
+
+  @@index([paymentId])
+  @@index([chargeId])
+}
+
+// PDF receipt, not a fiscal document. New financial adjustment => new version, old kept.
+model Receipt {
+  id        String   @id @default(cuid())
+  chargeId  String
+  charge    Charge   @relation(fields: [chargeId], references: [id])
+  version   Int      @default(1)
+  pdfUrl    String?
+  status    String   @default("GENERATED") // GENERATED | SENT
+  sentAt    DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([chargeId])
+}
+
+// One-off session; creates exactly one Charge, once, after status becomes HELD.
+model IndividualTraining {
+  id              String                 @id @default(cuid())
+  organizationId  String
+  athleteId       String
+  athlete         Athlete                @relation(fields: [athleteId], references: [id])
+  coachEmployeeId String?
+  venueId         String?
+  scheduledAt     DateTime
+  status          TrainingSessionStatus  @default(SCHEDULED)
+  price           Int
+
+  charge Charge?
+
+  @@index([athleteId])
+}
+
+// ---------------------------------------------------------------
+// Communications
+// ---------------------------------------------------------------
+
+model MessageTemplate {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  name           String
+  kind           String // SYSTEM | CUSTOM
+  subject        String?
+  body           String // supports {athlete} {group} {venue} {coach} {amount} {debt} {period} {due_date}
+  createdAt      DateTime     @default(now())
+
+  mailings Mailing[]
+
+  @@index([organizationId])
+}
+
+enum MailingScopeType {
+  ORGANIZATION
+  VENUE
+  SPORT
+  GROUP
+  SELECTED
+}
+
+model Mailing {
+  id                  String           @id @default(cuid())
+  organizationId      String
+  organization        Organization     @relation(fields: [organizationId], references: [id])
+  templateId          String?
+  template            MessageTemplate? @relation(fields: [templateId], references: [id])
+  scopeType           MailingScopeType
+  scopeId             String? // venueId / sportTypeId / groupId depending on scopeType
+  createdByEmployeeId String
+  createdAt           DateTime         @default(now())
+
+  logs CommunicationLog[]
+
+  @@index([organizationId])
+}
+
+enum CommunicationStatus {
+  QUEUED
+  SENT
+  DELIVERED
+  FAILED
+  BOUNCED
+}
+
+// History is kept per concrete recipient (representative), not per thread.
+model CommunicationLog {
+  id                String               @id @default(cuid())
+  mailingId         String?
+  mailing           Mailing?             @relation(fields: [mailingId], references: [id])
+  athleteId         String?
+  athlete           Athlete?             @relation(fields: [athleteId], references: [id])
+  representativeId  String?
+  channel           String               @default("EMAIL")
+  status            CommunicationStatus  @default(QUEUED)
+  providerMessageId String?
+  sentAt            DateTime?
+
+  @@index([athleteId])
+  @@index([mailingId])
+}
+
+// ---------------------------------------------------------------
+// Audit
+// ---------------------------------------------------------------
+
+model AuditLog {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  employeeId     String?
+  employee       Employee?    @relation(fields: [employeeId], references: [id])
+  entityType     String
+  entityId       String
+  action         String // CREATE | UPDATE | DELETE | REVERSE | ...
+  before         String? // JSON-serialized snapshot
+  after          String? // JSON-serialized snapshot
+  createdAt      DateTime     @default(now())
+
+  @@index([organizationId, entityType, entityId])
+}
