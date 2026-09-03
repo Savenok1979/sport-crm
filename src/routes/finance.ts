@@ -83,7 +83,7 @@ financeRouter.get("/debts", async (req, res) => {
     const remaining = c.totalAmount - paid;
     const days = Math.floor((Date.now() - c.dueDate.getTime()) / 86400000);
     const bucket = days <= 7 ? "1-7" : days <= 30 ? "8-30" : "30+";
-    return { chargeId: c.id, athlete: c.athlete.fullName, remaining, days, bucket };
+    return { chargeId: c.id, athleteId: c.athleteId, athlete: c.athlete.fullName, remaining, days, bucket };
   });
 
   res.json(rows);

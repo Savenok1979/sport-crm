@@ -22,6 +22,26 @@ groupsRouter.get("/", async (req, res) => {
   res.json(groups);
 });
 
+groupsRouter.get("/:id", async (req, res) => {
+  const { organizationId } = req.employee!;
+  const groupScope = await resolveGroupScope(req.employee!);
+  if (groupScope && !groupScope.includes(req.params.id)) return res.status(404).json({ error: "Group not found" });
+
+  const group = await prisma.group.findFirst({
+    where: { id: req.params.id, organizationId },
+    include: {
+      venue: true,
+      sportType: true,
+      coaches: { include: { employee: { include: { user: true } } } },
+      scheduleRules: true,
+      groupTariffs: { include: { tariff: true } },
+      _count: { select: { athleteGroups: true } },
+    },
+  });
+  if (!group) return res.status(404).json({ error: "Group not found" });
+  res.json(group);
+});
+
 const createGroupSchema = z.object({
   venueId: z.string(),
   sportTypeId: z.string(),
@@ -35,6 +55,76 @@ groupsRouter.post("/", requireRole("OWNER", "ADMINISTRATOR"), async (req, res) =
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
   const group = await prisma.group.create({ data: { organizationId, ...parsed.data } });
   res.status(201).json(group);
+});
+
+const updateGroupSchema = z.object({
+  name: z.string().min(1).optional(),
+  participantLimit: z.number().int().positive().nullable().optional(),
+});
+
+groupsRouter.patch("/:id", requireRole("OWNER", "ADMINISTRATOR"), async (req, res) => {
+  const { organizationId } = req.employee!;
+  const groupScope = await resolveGroupScope(req.employee!);
+  if (groupScope && !groupScope.includes(req.params.id)) return res.status(404).json({ error: "Group not found" });
+  const parsed = updateGroupSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+  const existing = await prisma.group.findFirst({ where: { id: req.params.id, organizationId } });
+  if (!existing) return res.status(404).json({ error: "Group not found" });
+
+  const group = await prisma.group.update({ where: { id: existing.id }, data: parsed.data });
+  res.json(group);
+});
+
+groupsRouter.post("/:id/archive", requireRole("OWNER", "ADMINISTRATOR"), async (req, res) => {
+  const { organizationId } = req.employee!;
+  const existing = await prisma.group.findFirst({ where: { id: req.params.id, organizationId } });
+  if (!existing) return res.status(404).json({ error: "Group not found" });
+  const group = await prisma.group.update({ where: { id: existing.id }, data: { status: "ARCHIVED" } });
+  res.json(group);
+});
+
+const groupCoachSchema = z.object({ employeeId: z.string(), coachRole: z.string().optional() });
+
+groupsRouter.post("/:id/coaches", requireRole("OWNER", "ADMINISTRATOR"), async (req, res) => {
+  const { organizationId } = req.employee!;
+  const parsed = groupCoachSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+  const group = await prisma.group.findFirst({ where: { id: req.params.id, organizationId } });
+  if (!group) return res.status(404).json({ error: "Group not found" });
+
+  const coach = await prisma.groupCoach.create({
+    data: { groupId: group.id, employeeId: parsed.data.employeeId, coachRole: parsed.data.coachRole ?? "MAIN" },
+    include: { employee: { include: { user: true } } },
+  });
+  res.status(201).json(coach);
+});
+
+const attachTariffSchema = z.object({ tariffId: z.string() });
+
+// POST /api/v1/groups/:id/tariffs — which tariffs are offered for this group (section 4/8.1).
+groupsRouter.post("/:id/tariffs", requireRole("OWNER", "ADMINISTRATOR"), async (req, res) => {
+  const { organizationId } = req.employee!;
+  const parsed = attachTariffSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+  const group = await prisma.group.findFirst({ where: { id: req.params.id, organizationId } });
+  if (!group) return res.status(404).json({ error: "Group not found" });
+
+  const groupTariff = await prisma.groupTariff.create({
+    data: { groupId: group.id, tariffId: parsed.data.tariffId },
+    include: { tariff: true },
+  });
+  res.status(201).json(groupTariff);
+});
+
+groupsRouter.delete("/:id/tariffs/:tariffId", requireRole("OWNER", "ADMINISTRATOR"), async (req, res) => {
+  const { organizationId } = req.employee!;
+  const group = await prisma.group.findFirst({ where: { id: req.params.id, organizationId } });
+  if (!group) return res.status(404).json({ error: "Group not found" });
+  await prisma.groupTariff.deleteMany({ where: { groupId: group.id, tariffId: req.params.tariffId } });
+  res.json({ ok: true });
 });
 
 const scheduleRuleSchema = z.object({

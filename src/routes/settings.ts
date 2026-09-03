@@ -73,3 +73,47 @@ settingsRouter.post("/sport-types/:id/archive", requireRole("OWNER"), async (req
   const sportType = await prisma.sportType.update({ where: { id: existing.id }, data: { archivedAt: new Date() } });
   res.json(sportType);
 });
+
+// ---------------------------------------------------------------
+// Tariffs (section 8.1): monthly group rates and one-off individual rates.
+// ---------------------------------------------------------------
+
+settingsRouter.get("/tariffs", async (req, res) => {
+  const { organizationId } = req.employee!;
+  const tariffs = await prisma.tariff.findMany({ where: { organizationId, archivedAt: null }, orderBy: { name: "asc" } });
+  res.json(tariffs);
+});
+
+const tariffSchema = z.object({
+  name: z.string().min(1),
+  price: z.number().int().positive(), // minor currency units
+  isIndividual: z.boolean().optional(),
+});
+
+settingsRouter.post("/tariffs", requireRole("OWNER", "ADMINISTRATOR"), async (req, res) => {
+  const { organizationId } = req.employee!;
+  const parsed = tariffSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+  const tariff = await prisma.tariff.create({ data: { organizationId, ...parsed.data } });
+  res.status(201).json(tariff);
+});
+
+settingsRouter.patch("/tariffs/:id", requireRole("OWNER", "ADMINISTRATOR"), async (req, res) => {
+  const { organizationId } = req.employee!;
+  const parsed = tariffSchema.partial().safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+  const existing = await prisma.tariff.findFirst({ where: { id: req.params.id, organizationId } });
+  if (!existing) return res.status(404).json({ error: "Tariff not found" });
+
+  const tariff = await prisma.tariff.update({ where: { id: existing.id }, data: parsed.data });
+  res.json(tariff);
+});
+
+settingsRouter.post("/tariffs/:id/archive", requireRole("OWNER", "ADMINISTRATOR"), async (req, res) => {
+  const { organizationId } = req.employee!;
+  const existing = await prisma.tariff.findFirst({ where: { id: req.params.id, organizationId } });
+  if (!existing) return res.status(404).json({ error: "Tariff not found" });
+  const tariff = await prisma.tariff.update({ where: { id: existing.id }, data: { archivedAt: new Date() } });
+  res.json(tariff);
+});

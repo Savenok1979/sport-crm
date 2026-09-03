@@ -29,7 +29,31 @@ attendanceRouter.get("/today", async (req, res) => {
     orderBy: { startsAt: "asc" },
   });
 
-  res.json(sessions);
+  // A freshly generated session has no Attendance rows at all — nothing is
+  // marked yet. Merge in every active member of the group so the trainer has
+  // a full roster to mark ("Отметить всех Был → изменить отсутствующих"),
+  // not just whoever happens to already have a row.
+  const withRoster = await Promise.all(
+    sessions.map(async (session) => {
+      const activeMembers = await prisma.athleteGroup.findMany({
+        where: { groupId: session.groupId, status: "ACTIVE" },
+        include: { athlete: true },
+      });
+      const marked = new Map(session.attendances.map((a) => [a.athleteId, a]));
+      const attendances = activeMembers.map(
+        (m) =>
+          marked.get(m.athleteId) ?? {
+            id: null,
+            athleteId: m.athleteId,
+            status: null,
+            athlete: m.athlete,
+          }
+      );
+      return { ...session, attendances };
+    })
+  );
+
+  res.json(withRoster);
 });
 
 const markSchema = z.object({

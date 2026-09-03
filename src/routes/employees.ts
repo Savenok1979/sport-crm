@@ -6,28 +6,32 @@ import { requireAuth, requireRole } from "../middleware/auth";
 
 export const employeesRouter = Router();
 employeesRouter.use(requireAuth);
-// Section 3: staff management is owner-only, no scoped exception for administrators.
-employeesRouter.use(requireRole("OWNER"));
 
-employeesRouter.get("/", async (req, res) => {
-  const { organizationId } = req.employee!;
+// Section 3: staff management (invite, role/status, venue access) is
+// owner-only. Reading the list is opened a little further than that: an
+// administrator needs to see trainers to assign them as group coaches, but
+// never the full roster (other admins/owner) or anyone outside their venues.
+employeesRouter.get("/", requireRole("OWNER", "ADMINISTRATOR"), async (req, res) => {
+  const { organizationId, role } = req.employee!;
   const employees = await prisma.employee.findMany({
-    where: { organizationId },
+    where: { organizationId, ...(role === "ADMINISTRATOR" ? { role: "TRAINER" } : {}) },
     include: { user: true, venueAccess: { include: { venue: true } }, coachOf: { include: { group: true } } },
     orderBy: { createdAt: "asc" },
   });
   res.json(employees);
 });
 
-employeesRouter.get("/:id", async (req, res) => {
-  const { organizationId } = req.employee!;
+employeesRouter.get("/:id", requireRole("OWNER", "ADMINISTRATOR"), async (req, res) => {
+  const { organizationId, role } = req.employee!;
   const employee = await prisma.employee.findFirst({
-    where: { id: req.params.id, organizationId },
+    where: { id: req.params.id, organizationId, ...(role === "ADMINISTRATOR" ? { role: "TRAINER" } : {}) },
     include: { user: true, venueAccess: { include: { venue: true } }, coachOf: { include: { group: true } } },
   });
   if (!employee) return res.status(404).json({ error: "Employee not found" });
   res.json(employee);
 });
+
+employeesRouter.use(requireRole("OWNER"));
 
 const inviteSchema = z.object({
   email: z.string().email(),
